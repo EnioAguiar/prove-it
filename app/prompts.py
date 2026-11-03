@@ -76,9 +76,12 @@ Rules:
 """
 
 
-def tests_user(code: str, intent: str | None) -> str:
+def tests_user(code: str, intent: str | None, feedback: str | None = None) -> str:
     stated = intent.strip() if intent and intent.strip() else "(none given; infer it from names and docstrings)"
-    return f"Intent: {stated}\n\nModule `target`:\n```python\n{code}\n```"
+    prompt = f"Intent: {stated}\n\nModule `target`:\n```python\n{code}\n```"
+    if feedback:
+        prompt += f"\n\nYour previous tests were rejected: {feedback}. Write new tests."
+    return prompt
 
 
 def fix_user(code: str, tests: str, failure: str) -> str:

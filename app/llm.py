@@ -24,7 +24,7 @@ class LLMError(Exception):
 
 
 class LLM(Protocol):
-    async def generate_tests(self, code: str, intent: str | None) -> str: ...
+    async def generate_tests(self, code: str, intent: str | None, feedback: str | None = None) -> str: ...
 
     async def fix_code(self, code: str, tests: str, failure: str) -> str: ...
 
@@ -116,8 +116,9 @@ class VultrLLM(LLM):
             return code
         raise LLMError("model returned invalid output")
 
-    async def generate_tests(self, code: str, intent: str | None) -> str:
-        return await self._code(prompts.TESTS_SYSTEM, prompts.tests_user(code, intent), _check_test_file)
+    async def generate_tests(self, code: str, intent: str | None, feedback: str | None = None) -> str:
+        user = prompts.tests_user(code, intent, feedback)
+        return await self._code(prompts.TESTS_SYSTEM, user, _check_test_file)
 
     async def fix_code(self, code: str, tests: str, failure: str) -> str:
         return await self._code(prompts.FIX_SYSTEM, prompts.fix_user(code, tests, failure))
