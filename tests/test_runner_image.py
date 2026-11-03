@@ -27,19 +27,33 @@ def test_runs_as_nobody():
     assert result.stdout.strip() == "65534"
 
 
-def test_hypothesis_profile_loaded():
-    code = (
+SANDBOX_FLAGS = [
+    "--rm", "--network", "none", "--read-only",
+    "--tmpfs", "/tmp:rw,size=64m",
+    "--memory", "256m", "--memory-swap", "256m", "--cpus", "0.5",
+    "--pids-limit", "64", "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges", "--user", "65534:65534",
+]
+
+
+def test_hypothesis_profile_loaded(tmp_path):
+    target = tmp_path / "test_target.py"
+    target.write_text(
+        "from hypothesis import settings\n"
+        "\n"
         "def test_profile():\n"
-        "    from hypothesis import settings\n"
         "    s = settings()\n"
         "    assert s.database is None\n"
         "    assert s.deadline is None\n"
         "    assert s.max_examples == 200\n"
         "    assert s.derandomize is True\n"
     )
-    script = f"mkdir -p /tmp/work && cd /tmp/work && printf '%s' \"$CODE\" > test_p.py && pytest -q --rootdir=/tmp/work --confcutdir=/tmp/work test_p.py"
+    tmp_path.chmod(0o755)
+    target.chmod(0o644)
     result = subprocess.run(
-        ["docker", "run", "--rm", "-e", f"CODE={code}", IMAGE, "sh", "-c", script],
+        ["docker", "run", *SANDBOX_FLAGS, "-v", f"{tmp_path}:/work:ro",
+         IMAGE, "python", "-m", "pytest", "-q", "/work/test_target.py"],
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
