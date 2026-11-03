@@ -134,3 +134,57 @@ def test_unparseable_user_src_does_not_raise():
     result = check_tests(GOOD_TESTS, "def broken(:\n")
     assert isinstance(result, GateResult)
     assert not result.ok
+    assert result.reasons == ["user code does not parse"]
+
+
+CLASS_SRC = '''
+class Stack:
+    def __init__(self):
+        self.items = []
+
+    def push(self, x):
+        self.items.append(x)
+'''
+
+
+def test_accepts_class_only_user_code():
+    star = '''
+from target import *
+from hypothesis import given, strategies as st
+
+
+@given(st.integers())
+def test_push(x):
+    s = Stack()
+    s.push(x)
+    assert s.items == [x]
+'''
+    qualified = '''
+import target
+from hypothesis import given, strategies as st
+
+
+@given(st.integers())
+def test_push(x):
+    s = target.Stack()
+    s.push(x)
+    assert s.items[-1] == x
+'''
+    assert check_tests(star, CLASS_SRC) == GateResult(ok=True, reasons=[])
+    assert check_tests(qualified, CLASS_SRC) == GateResult(ok=True, reasons=[])
+
+
+def test_rejects_ellipsis_and_truthy_constant_asserts():
+    src = GOOD_TESTS + '''
+
+def test_ellipsis():
+    ...
+
+
+def test_assert_one():
+    assert 1
+'''
+    result = check_tests(src, USER_SRC)
+    assert not result.ok
+    assert any("test_ellipsis" in r for r in result.reasons)
+    assert any("test_assert_one" in r for r in result.reasons)

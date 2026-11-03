@@ -19,7 +19,9 @@ def check_tests(test_src: str, user_src: str) -> GateResult:
     except (SyntaxError, ValueError) as exc:
         return GateResult(ok=False, reasons=[f"tests do not parse: {exc}"])
 
-    public = _public_functions(user_src)
+    public = _public_callables(user_src)
+    user_parses = public is not None
+    public = public or set()
     imported, bare_names, module_aliases = _target_bindings(tree, public)
     functions = [n for n in ast.walk(tree)
                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
@@ -30,24 +32,27 @@ def check_tests(test_src: str, user_src: str) -> GateResult:
         reasons.append(f"forbidden import of {module}")
     if not imported:
         reasons.append(f"tests do not import from {TARGET_MODULE}")
-    if not any(_calls_public(t, public, bare_names, module_aliases) for t in tests):
-        reasons.append("no test function calls a public function from the user code")
+    if not user_parses:
+        reasons.append("user code does not parse")
+    elif not any(_calls_public(t, public, bare_names, module_aliases) for t in tests):
+        reasons.append("no test function calls a public function or class from the user code")
     if not any(_is_given(d) for f in functions for d in f.decorator_list):
         reasons.append("no function is decorated with hypothesis given")
     for t in tests:
         if _is_trivial(t):
-            reasons.append(f"{t.name} only contains assert True or pass")
+            reasons.append(f"{t.name} only contains trivial statements (assert True, pass, ...)")
 
     return GateResult(ok=not reasons, reasons=reasons)
 
 
-def _public_functions(user_src: str) -> set[str]:
+def _public_callables(user_src: str) -> set[str] | None:
+    """Public top-level functions and classes of the user code; None if it does not parse."""
     try:
         tree = ast.parse(user_src)
     except (SyntaxError, ValueError):
-        return set()
+        return None
     return {n.name for n in tree.body
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
             and not n.name.startswith("_")}
 
 
@@ -100,11 +105,10 @@ def _is_trivial(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         if isinstance(stmt, ast.Pass):
             continue
         if (isinstance(stmt, ast.Assert) and isinstance(stmt.test, ast.Constant)
-                and stmt.test.value is True):
-            continue
-        if (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant)
-                and isinstance(stmt.value.value, str)):
-            continue  # docstring
+                and stmt.test.value):
+            continue  # assert True / assert 1 / assert "x"
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            continue  # docstring, bare ..., stray literal
         return False
     return True
 
