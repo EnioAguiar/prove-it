@@ -1,6 +1,7 @@
 import asyncio
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,11 @@ class RunResult:
     duration_s: float
     timed_out: bool
     container_name: str
+
+
+# (job_dir, argv, timeout_s) -> RunResult; callers bind Settings, e.g.
+# functools.partial(run_in_sandbox, settings=settings).
+Runner = Callable[[Path, list[str], float], Awaitable[RunResult]]
 
 
 def sandbox_command(job_dir: Path, argv: list[str], name: str, settings: Settings) -> list[str]:
