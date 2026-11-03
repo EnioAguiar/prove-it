@@ -1,0 +1,29 @@
+[project]
+name = "prove-it"
+version = "0.1.0"
+description = "An LLM writes property-based tests for your Python code and runs them in a hardened sandbox."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic-settings>=2.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "httpx2>=2.16.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-m 'not docker'"
+markers = [
+    "docker: tests that need a local Docker daemon and the runner image",
+]
