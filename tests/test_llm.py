@@ -155,12 +155,12 @@ def test_feedback_reaches_request():
     fake = FakeVultr(_fenced(VALID_TESTS), _fenced(VALID_TESTS))
     llm = _llm(fake)
     asyncio.run(llm.generate_tests(USER_CODE, "adds numbers"))
-    asyncio.run(llm.generate_tests(USER_CODE, "adds numbers", feedback="NameError: name 'sub' is not defined"))
+    feedback = "  NameError: name 'sub' is not defined\n"
+    asyncio.run(llm.generate_tests(USER_CODE, "adds numbers", feedback=feedback))
     first = "\n".join(m["content"] for m in fake.requests[0]["messages"])
     second = "\n".join(m["content"] for m in fake.requests[1]["messages"])
     assert "rejected" not in first
-    assert "Your previous tests were rejected: NameError: name 'sub' is not defined" in second
-    assert "Write new tests." in second
+    assert "Your previous tests were rejected: NameError: name 'sub' is not defined. Write new tests." in second
     assert USER_CODE in second
 
 

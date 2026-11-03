@@ -349,6 +349,7 @@ def test_fix_llm_error_keeps_verdict():
     assert report.explanation == "Plain explanation."
     assert report.receipt is not None
     assert ("fix", "fail") in [(s.step, s.status) for s in rec.steps]
+    assert "No fix could be generated." in llm.explain_calls[0]
 
 
 def test_second_fix_llm_error_keeps_first_attempt():
@@ -360,9 +361,48 @@ def test_second_fix_llm_error_keeps_first_attempt():
             return await super().fix_code(code, tests, failure)
 
     second = run(1, "still failing\n")
-    report, _ = review(OneFix(fixes=(STILL_BROKEN,)), FakeRunner(FAIL, second))
+    llm = OneFix(fixes=(STILL_BROKEN,))
+    report, _ = review(llm, FakeRunner(FAIL, second))
     assert report.fix == STILL_BROKEN
     assert report.fix_run == second
+    summary = llm.explain_calls[0]
+    assert "The suggested fix did not pass the tests either." in summary
+    assert "No fix could be generated." not in summary
+
+
+class FailingMutation(Recorder):
+    async def mutate(self, code, tests):
+        self.mutate_calls.append((code, tests))
+        raise RuntimeError("docker: Cannot connect to the Docker daemon")
+
+
+class FailingReceipt(Recorder):
+    def receipt(self, code, tests, original_run):
+        self.receipt_calls.append((code, tests, original_run))
+        raise RuntimeError("docker: Cannot connect to the Docker daemon")
+
+
+@pytest.mark.parametrize("runs, verdict", [((PASS,), "PASS"), ((FAIL, PASS), "FAIL")])
+def test_mutation_failure_keeps_verdict(runs, verdict):
+    rec = FailingMutation()
+    report, _ = review(FakeLLM(), FakeRunner(*runs), rec)
+    assert report.verdict == verdict
+    assert len(rec.mutate_calls) == 1
+    assert report.mutation is None
+    assert report.receipt is not None
+    steps = [(s.step, s.status) for s in rec.steps]
+    assert ("mutation", "fail") in steps and ("mutation", "ok") not in steps
+    assert rec.steps[-1] == StepEvent("done", "ok", verdict)
+
+
+def test_receipt_failure_keeps_verdict():
+    rec = FailingReceipt()
+    report, _ = review(FakeLLM(), FakeRunner(FAIL, PASS), rec)
+    assert report.verdict == "FAIL"
+    assert len(rec.receipt_calls) == 1
+    assert report.receipt is None
+    assert report.mutation == MutationResult(4, 3, [])
+    assert rec.steps[-1] == StepEvent("done", "ok", "FAIL")
 
 
 def test_explain_llm_error_falls_back_to_summary():

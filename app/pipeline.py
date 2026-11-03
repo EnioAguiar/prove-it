@@ -123,23 +123,26 @@ class _Review:
         # From here on the tests are frozen.
         events = detect_events(run)
         verdict: Verdict = "PASS" if _passed(run) else "FAIL"
-        fix, fix_run = None, None
+        fix, fix_run, fix_unavailable = None, None, False
         if verdict == "FAIL" and not events:
-            fix, fix_run = await self._fix(tests, run)
+            fix, fix_run, fix_unavailable = await self._fix(tests, run)
 
         passing_code = self.code if verdict == "PASS" else fix if fix_run and _passed(fix_run) else None
         mutation = None
         if passing_code is not None:
-            await self._step("mutation", "start")
-            mutation = await mutate(passing_code, tests)
-            await self._step("mutation", "ok", f"{mutation.killed} of {mutation.total} mutants killed")
+            mutation = await self._mutation(mutate, passing_code, tests)
 
-        summary = _summary(verdict, run, events, fix_run, mutation, mutated_fix=verdict == "FAIL")
+        summary = _summary(verdict, run, events, fix_run, fix_unavailable, mutation,
+                           mutated_fix=verdict == "FAIL")
         explanation = await self._explain(summary)
+        try:
+            run_receipt = receipt(self.code, tests, run)
+        except Exception:  # the verdict is decided; a missing receipt must not lose it
+            run_receipt = None
         report = Report(
             verdict=verdict, error=None, code=self.code, tests=tests, original_run=run,
             events=events, fix=fix, fix_run=fix_run, mutation=mutation,
-            explanation=explanation, receipt=receipt(self.code, tests, run),
+            explanation=explanation, receipt=run_receipt,
         )
         await self._step("done", "ok", verdict)
         return report
@@ -184,8 +187,9 @@ class _Review:
         await self._step(step, "ok" if _passed(result) else "fail", detail)
         return result
 
-    async def _fix(self, tests: str, original_run: RunResult) -> tuple[str | None, RunResult | None]:
-        """Each attempt builds on the previous one; stop at the first passing run."""
+    async def _fix(self, tests: str, original_run: RunResult) -> tuple[str | None, RunResult | None, bool]:
+        """Each attempt builds on the previous one; stop at the first passing run.
+        Returns (last fix, its run, whether the model failed to produce an attempt)."""
         code, failed = self.code, original_run
         fix, fix_run = None, None
         for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
@@ -194,13 +198,23 @@ class _Review:
                 candidate = await self.llm.fix_code(code, tests, _tail(_output(failed), FAILURE_CHARS))
             except LLMError as exc:
                 await self._step("fix", "fail", str(exc))
-                break
+                return fix, fix_run, True
             await self._step("fix", "ok", f"attempt {attempt}")
             fix, fix_run = candidate, await self._run("rerun", candidate, tests)
             if _passed(fix_run):
                 break
             code, failed = fix, fix_run
-        return fix, fix_run
+        return fix, fix_run, False
+
+    async def _mutation(self, mutate: MutateFn, code: str, tests: str) -> MutationResult | None:
+        await self._step("mutation", "start")
+        try:
+            mutation = await mutate(code, tests)
+        except Exception as exc:  # e.g. docker failure; the verdict is already decided
+            await self._step("mutation", "fail", f"mutation testing could not run: {exc}"[:200])
+            return None
+        await self._step("mutation", "ok", f"{mutation.killed} of {mutation.total} mutants killed")
+        return mutation
 
     async def _explain(self, summary: str) -> str:
         await self._step("explain", "start")
@@ -276,7 +290,8 @@ def _counterexamples(output: str) -> list[str]:
 
 
 def _summary(verdict: Verdict, run: RunResult, events: list[ContainmentEvent],
-             fix_run: RunResult | None, mutation: MutationResult | None, mutated_fix: bool) -> str:
+             fix_run: RunResult | None, fix_unavailable: bool, mutation: MutationResult | None,
+             mutated_fix: bool) -> str:
     """Facts only, built by code. The verdict line is final; the explanation cannot change it."""
     if verdict == "PASS":
         lines = ["Verdict: PASS (final). All generated tests passed on the user's original code "
@@ -303,6 +318,8 @@ def _summary(verdict: Verdict, run: RunResult, events: list[ContainmentEvent],
                          "The verdict for the original code stays FAIL.")
         else:
             lines.append("The suggested fix did not pass the tests either.")
+    elif fix_unavailable:
+        lines.append("No fix could be generated.")
     if mutation is not None:
         which = "the suggested fix" if mutated_fix else "the original code"
         lines.append(f"Mutation score: the tests caught {mutation.killed} of {mutation.total} "
