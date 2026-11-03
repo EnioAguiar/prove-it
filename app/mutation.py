@@ -133,7 +133,7 @@ def _snippet(node: ast.AST, cap: int = 80) -> str:
 
 async def run_mutation(code: str, tests: str, runner: Runner) -> MutationResult:
     """Run every mutant of `code` against the frozen `tests` in one sandbox run.
-    A mutant counts as killed only if the runner reports it killed."""
+    A mutant counts as killed only if the runner reports it killed in a trustworthy run."""
     mutants = make_mutants(code)
     if not mutants:
         return MutationResult(total=0, killed=0, survivors=[])
@@ -141,7 +141,7 @@ async def run_mutation(code: str, tests: str, runner: Runner) -> MutationResult:
         job_dir = Path(tmp)
         _write_job(job_dir, tests, mutants)
         result = await runner(job_dir, RUN_ARGV, RUN_TIMEOUT_S)
-    killed_ids = _killed_ids(result.stdout, {m.id for m in mutants})
+    killed_ids = _killed_ids(result.stdout, [m.id for m in mutants])
     return MutationResult(
         total=len(mutants),
         killed=len(killed_ids),
@@ -168,9 +168,16 @@ def _write_job(job_dir: Path, tests: str, mutants: list[Mutant]) -> None:
         target.chmod(0o644)
 
 
-def _killed_ids(stdout: str, known_ids: set[int]) -> set[int]:
-    """Only well-formed `{"id": int, "killed": bool}` lines for known ids count."""
+def _killed_ids(stdout: str, ids_in_order: list[int]) -> set[int]:
+    """Killed ids from the runner's report lines, or none if the reports look forged.
+
+    Non-JSON lines and JSON values that are not objects are ignored. Every JSON object
+    is a report and must be exactly `{"id": int, "killed": bool}`, with reports for
+    `ids_in_order` arriving once each, in that order (the runner may stop early). A
+    mutant can write into the runner's stdout, so any duplicate, out-of-order, unknown
+    or malformed report makes the whole run untrusted: every mutant survives."""
     killed: set[int] = set()
+    expected = iter(ids_in_order)
     for line in stdout.splitlines():
         try:
             report = json.loads(line)
@@ -178,8 +185,10 @@ def _killed_ids(stdout: str, known_ids: set[int]) -> set[int]:
             continue
         if not isinstance(report, dict):
             continue
-        mutant_id, is_killed = report.get("id"), report.get("killed")
-        if type(mutant_id) is int and type(is_killed) is bool and mutant_id in known_ids:
-            if is_killed:
-                killed.add(mutant_id)
+        is_killed = report.get("killed")
+        if (report.keys() != {"id", "killed"} or type(is_killed) is not bool
+                or report["id"] != next(expected, None) or type(report["id"]) is not int):
+            return set()
+        if is_killed:
+            killed.add(report["id"])
     return killed

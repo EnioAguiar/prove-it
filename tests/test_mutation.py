@@ -127,10 +127,8 @@ def test_run_mutation_layout_and_parsing():
     stdout = "\n".join([
         "some noise",
         json.dumps({"id": 1, "killed": True}),
-        '{"id": 2, "killed": tru',  # malformed
-        json.dumps({"id": 99, "killed": True}),  # unknown id
-        json.dumps({"id": True, "killed": True}),  # bool id
-        json.dumps(["not", "a", "dict"]),
+        '{"id": 2, "killed": tru',  # malformed: ignored
+        json.dumps(["not", "a", "dict"]),  # not a report: ignored
     ])
     seen: dict = {}
     result = asyncio.run(run_mutation(ADD, tests, _fake_runner(stdout, seen)))
@@ -162,3 +160,46 @@ def test_run_mutation_without_mutants_skips_sandbox():
 
     result = asyncio.run(run_mutation("X = 'a'\n", "", runner))
     assert result == MutationResult(total=0, killed=0, survivors=[])
+
+
+def _killed_from(*lines: str) -> MutationResult:
+    # ADD has two mutants: id 1 (`+` → `-`) and id 2 (`return None`).
+    return asyncio.run(run_mutation(ADD, "x = 1\n", _fake_runner("\n".join(lines), {})))
+
+
+def _report(mutant_id, killed) -> str:
+    return json.dumps({"id": mutant_id, "killed": killed})
+
+
+def test_in_order_reports_are_trusted():
+    result = _killed_from(_report(1, True), "noise", _report(2, False))
+    assert result.killed == 1
+    assert [m.id for m in result.survivors] == [2]
+    assert _killed_from(_report(1, True), _report(2, True)).killed == 2
+
+
+def _assert_untrusted(result: MutationResult) -> None:
+    assert result.total == 2
+    assert result.killed == 0
+    assert [m.id for m in result.survivors] == [1, 2]
+
+
+def test_duplicate_report_marks_run_untrusted():
+    # A forged `true` for the same id, before or after the real report.
+    _assert_untrusted(_killed_from(_report(1, False), _report(1, True), _report(2, True)))
+    _assert_untrusted(_killed_from(_report(1, True), _report(2, True), _report(2, False)))
+
+
+def test_out_of_order_report_marks_run_untrusted():
+    _assert_untrusted(_killed_from(_report(2, True), _report(1, True)))
+    # Skipping an id is out of order too: the runner reports every mutant in id order.
+    _assert_untrusted(_killed_from(_report(2, True)))
+
+
+def test_unknown_or_malformed_report_marks_run_untrusted():
+    _assert_untrusted(_killed_from(_report(1, True), _report(2, True), _report(3, True)))
+    _assert_untrusted(_killed_from(_report(1, True), _report(True, True)))
+    _assert_untrusted(_killed_from(_report(1, True), _report(2, 1)))
+    _assert_untrusted(_killed_from(_report(1, True), json.dumps({"id": 2})))
+    _assert_untrusted(_killed_from(
+        _report(1, True), json.dumps({"id": 2, "killed": True, "x": 1})))

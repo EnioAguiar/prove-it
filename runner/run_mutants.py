@@ -9,9 +9,15 @@ Each mutant runs `pytest -q -x <root>/test_target.py` in a forked child of this
 process. A fresh interpreter needs ~3 s just to import pytest and Hypothesis at
 0.5 CPU, more than the per-mutant timeout, so those imports (plus the modules the
 test file and the mutants import) are done once here, before forking.
+
+Mutant code runs as the same uid as this process. To keep it from writing forged
+reports into our stdout through /proc/<pid>/fd/1, this process makes itself
+non-dumpable first. After each mutant, every process it left behind is killed and
+reaped, so leftovers cannot pile up against --pids-limit or disturb the next mutant.
 """
 
 import ast
+import ctypes
 import importlib
 import json
 import os
@@ -25,6 +31,16 @@ import pytest
 MUTANT_TIMEOUT_S = 2
 TOTAL_BUDGET_S = 28
 _POLL_S = 0.005
+_PR_SET_DUMPABLE = 4
+
+
+def _make_undumpable() -> None:
+    """Non-dumpable: other processes of our uid (the mutants) lose access to our
+    /proc/<pid>/fd, mem and environ. Fail closed: no reports rather than forgeable ones."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, f"prctl(PR_SET_DUMPABLE, 0): {os.strerror(err)}")
 
 
 def _mutant_ids(mutants_dir: Path) -> list[int]:
@@ -75,7 +91,10 @@ def _child(tests: Path, mutant_dir: Path) -> None:
 
 
 def _killed(tests: Path, mutant_dir: Path) -> bool:
-    pid = os.fork()
+    try:
+        pid = os.fork()
+    except OSError:
+        return True  # cannot run the tests at all
     if pid == 0:
         _child(tests, mutant_dir)
     try:
@@ -96,8 +115,30 @@ def _killed(tests: Path, mutant_dir: Path) -> bool:
     return True  # timed out
 
 
+def _clean_up_leftovers() -> None:
+    """Kill and reap whatever the last mutant left behind, e.g. processes that called
+    setsid() to leave the process group killed on timeout."""
+    flags = os.WNOHANG
+    if os.getpid() == 1:
+        # Sandbox init: every other process in the container descends from a mutant.
+        # Never do this outside the container: kill(-1) would hit all our uid's processes.
+        try:
+            os.kill(-1, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # nothing left
+        flags = 0  # all of them are dying and are (or become) our children: wait for all
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, flags)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
 def main(root: Path) -> None:
     deadline = time.monotonic() + TOTAL_BUDGET_S
+    _make_undumpable()
     tests = root / "test_target.py"
     mutants_dir = root / "mutants"
     ids = _mutant_ids(mutants_dir)
@@ -106,6 +147,7 @@ def main(root: Path) -> None:
         if time.monotonic() + MUTANT_TIMEOUT_S > deadline:
             break
         killed = _killed(tests, mutants_dir / str(mutant_id))
+        _clean_up_leftovers()
         print(json.dumps({"id": mutant_id, "killed": killed}), flush=True)
 
 
