@@ -1,6 +1,10 @@
 import subprocess
+import uuid
 
 import pytest
+
+from app.config import Settings
+from app.sandbox import sandbox_command
 
 IMAGE = "proveit-runner:py312"
 
@@ -27,15 +31,6 @@ def test_runs_as_nobody():
     assert result.stdout.strip() == "65534"
 
 
-SANDBOX_FLAGS = [
-    "--rm", "--network", "none", "--read-only",
-    "--tmpfs", "/tmp:rw,size=64m",
-    "--memory", "256m", "--memory-swap", "256m", "--cpus", "0.5",
-    "--pids-limit", "64", "--cap-drop", "ALL",
-    "--security-opt", "no-new-privileges", "--user", "65534:65534",
-]
-
-
 def test_hypothesis_profile_loaded(tmp_path):
     target = tmp_path / "test_target.py"
     target.write_text(
@@ -50,10 +45,15 @@ def test_hypothesis_profile_loaded(tmp_path):
     )
     tmp_path.chmod(0o755)
     target.chmod(0o644)
-    result = subprocess.run(
-        ["docker", "run", *SANDBOX_FLAGS, "-v", f"{tmp_path}:/work:ro",
-         IMAGE, "python", "-m", "pytest", "-q", "/work/test_target.py"],
-        capture_output=True, text=True, timeout=120,
+    settings = Settings(
+        vultr_api_key="x", vultr_model="x", sandbox_image=IMAGE, _env_file=None,
     )
+    cmd = sandbox_command(
+        tmp_path,
+        ["python", "-m", "pytest", "-q", "/work/test_target.py"],
+        f"proveit-test-{uuid.uuid4().hex[:12]}",
+        settings,
+    )
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
