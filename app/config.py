@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     vultr_base_url: str = "https://api.vultrinference.com/v1"
     sandbox_image: str = "proveit-runner:py312"
     sandbox_runtime: str = "runc"
+    trust_proxy: bool = False  # behind Caddy: client IP = last X-Forwarded-For entry
+    job_root: str | None = None  # host-visible dir for sandbox job dirs (deploy)
 
 
 @lru_cache
