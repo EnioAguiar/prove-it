@@ -77,7 +77,13 @@ def _target_bindings(tree: ast.Module, public: set[str]) -> tuple[bool, set[str]
     return imported, bare, modules
 
 
+# Passing a user function to these only inspects it; it is never run.
+_INTROSPECTION = {"callable", "isinstance", "issubclass", "hasattr", "getattr", "type", "id", "repr", "str", "print"}
+
+
 def _calls_public(fn: ast.AST, public: set[str], bare: set[str], modules: set[str]) -> bool:
+    """A test calls user code directly, or hands a user function to something that runs it
+    (a timeout helper, `threading.Thread(target=fn)`, `pytest.raises(..., fn)`)."""
     for stmt in fn.body:
         for node in ast.walk(stmt):
             if not isinstance(node, ast.Call):
@@ -87,6 +93,11 @@ def _calls_public(fn: ast.AST, public: set[str], bare: set[str], modules: set[st
                 return True
             if (isinstance(func, ast.Attribute) and func.attr in public
                     and isinstance(func.value, ast.Name) and func.value.id in modules):
+                return True
+            if isinstance(func, ast.Name) and func.id in _INTROSPECTION:
+                continue
+            passed = [*node.args, *(kw.value for kw in node.keywords)]
+            if any(isinstance(arg, ast.Name) and arg.id in bare for arg in passed):
                 return True
     return False
 

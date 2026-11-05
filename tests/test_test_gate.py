@@ -188,3 +188,22 @@ def test_assert_one():
     assert not result.ok
     assert any("test_ellipsis" in r for r in result.reasons)
     assert any("test_assert_one" in r for r in result.reasons)
+
+
+def test_accepts_user_function_handed_to_a_runner():
+    """Code that never returns can only be tested through a timeout helper or a thread."""
+    user = "def wait_for_ready():\n    while True:\n        pass\n"
+    tests = (
+        "import threading\nfrom hypothesis import given, strategies as st\nfrom target import *\n\n"
+        "def _run(fn):\n    t = threading.Thread(target=fn, daemon=True)\n    t.start()\n    t.join(0.2)\n"
+        "    return t.is_alive()\n\n"
+        "@given(st.integers())\ndef test_blocks(_):\n    assert _run(wait_for_ready)\n"
+    )
+    assert check_tests(tests, user).ok
+
+
+def test_rejects_function_only_inspected():
+    user = "def wait_for_ready():\n    return True\n"
+    tests = ("from hypothesis import given, strategies as st\nfrom target import *\n\n"
+             "@given(st.integers())\ndef test_exists(_):\n    assert callable(wait_for_ready)\n")
+    assert not check_tests(tests, user).ok
