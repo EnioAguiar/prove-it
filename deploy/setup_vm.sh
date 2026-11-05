@@ -24,21 +24,9 @@ https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_C
 fi
 docker --version
 
-echo "== gVisor (optional extra isolation layer)"
-if ! command -v runsc >/dev/null; then
-  curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor --yes -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] \
-https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
-  apt-get update -q
-  apt-get install -yq runsc
-fi
-runsc install
-systemctl restart docker
-if docker run --rm --runtime=runsc hello-world >/dev/null 2>&1; then
-  echo "gVisor works: set SANDBOX_RUNTIME=runsc in $APP_DIR/.env"
-else
-  echo "gVisor does not run here: keep SANDBOX_RUNTIME=runc"
-fi
+# No gVisor: tested on this VM (2026-11-05), a sandbox under runsc that hits --pids-limit dies
+# with exit 2 and loses all output, so the verdict and the containment evidence are lost.
+# Sandboxes use hardened runc (see SANDBOX flags in app/sandbox.py).
 
 echo "== Firewall: SSH, HTTP, HTTPS only"
 ufw allow 22/tcp
