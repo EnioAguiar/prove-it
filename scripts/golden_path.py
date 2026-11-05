@@ -46,6 +46,29 @@ def review(base: str, code: str, intent: str) -> dict:
     raise RuntimeError("stream ended without a report")
 
 
+def post_json(base: str, path: str, body: dict) -> dict:
+    request = urllib.request.Request(
+        f"{base}{path}", data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read())
+
+
+def check_signature(base: str, report: dict) -> list[str]:
+    """The receipt verifies as sent, and stops verifying once its verdict is flipped."""
+    receipt = report["receipt"]
+    if receipt is None:
+        return ["no receipt"]
+    problems = []
+    if not post_json(base, "/api/verify", receipt)["valid"]:
+        problems.append("receipt signature does not verify")
+    forged = {**receipt, "verdict": "PASS" if receipt["verdict"] == "FAIL" else "FAIL"}
+    if post_json(base, "/api/verify", forged)["valid"]:
+        problems.append("a forged receipt verified")
+    return problems
+
+
 def check_installments(report: dict) -> list[str]:
     problems = []
     if report["verdict"] != "FAIL":
@@ -101,7 +124,7 @@ def main() -> int:
         report = None
         try:
             report = review(base, (EXAMPLES / f"{name}.py").read_text(), example["intent"])
-            problems = CHECKS[name](report)
+            problems = CHECKS[name](report) + check_signature(base, report)
             if report["error"]:
                 problems.append(f"error: {report['error']}")
         except urllib.error.HTTPError as exc:

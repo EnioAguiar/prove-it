@@ -1,14 +1,18 @@
 import asyncio
 import hashlib
+import json
 import re
 import shlex
+from dataclasses import asdict
 from pathlib import Path
 
 from app import receipt as receipt_mod
 from app.config import Settings
 from app.receipt import RUN_ARGV, build_receipt, read_image_digest
 from app.sandbox import RunResult, sandbox_command
+from app.signing import Signer
 
+SIGNER = Signer.from_seed_b64(None)
 DIGEST = "ghcr.io/enioaguiar/proveit-runner@sha256:" + "a" * 64
 
 
@@ -21,7 +25,7 @@ def _run() -> RunResult:
 
 
 def test_hashes_match_sha256():
-    r = build_receipt("def f(): pass\n", "def test_f(): pass\n", _run(), _settings(), DIGEST)
+    r = build_receipt("def f(): pass\n", "def test_f(): pass\n", _run(), _settings(), DIGEST, SIGNER)
     assert r.code_sha256 == hashlib.sha256(b"def f(): pass\n").hexdigest()
     assert r.tests_sha256 == hashlib.sha256(b"def test_f(): pass\n").hexdigest()
     assert r.exit_code == 0 and r.duration_s == 1.5
@@ -29,7 +33,7 @@ def test_hashes_match_sha256():
 
 
 def test_command_contains_all_limits():
-    r = build_receipt("x", "y", _run(), _settings(), DIGEST)
+    r = build_receipt("x", "y", _run(), _settings(), DIGEST, SIGNER)
     for flag in ["--rm", "--network none", "--read-only", "--tmpfs /tmp:rw,size=64m", "--memory 256m",
                  "--memory-swap 256m", "--cpus 0.5", "--pids-limit 64", "--cap-drop ALL",
                  "--security-opt no-new-privileges", "--user 65534:65534", '-v "$PWD":/work:ro']:
@@ -43,7 +47,7 @@ def test_command_contains_all_limits():
 
 
 def test_command_has_no_env():
-    r = build_receipt("x", "y", _run(), _settings(), DIGEST)
+    r = build_receipt("x", "y", _run(), _settings(), DIGEST, SIGNER)
     tokens = shlex.split(r.command)
     assert "-e" not in tokens and "--env" not in tokens and "--env-file" not in tokens
     assert not any(t.startswith(("--env=", "--env-file=")) for t in tokens)
@@ -52,7 +56,7 @@ def test_command_has_no_env():
 def test_command_round_trips_to_sandbox_flags():
     for runtime in ("runc", "runsc"):
         s = _settings(sandbox_runtime=runtime)
-        r = build_receipt("x", "y", _run(), s, DIGEST)
+        r = build_receipt("x", "y", _run(), s, DIGEST, SIGNER)
         assert r.runtime == runtime
         job = Path("/some/job")
         tokens = shlex.split(r.command.replace('"$PWD"', str(job)))
@@ -65,7 +69,7 @@ def test_command_round_trips_to_sandbox_flags():
 
 def test_without_digest_uses_local_image():
     s = _settings()
-    r = build_receipt("x", "y", _run(), s, "")
+    r = build_receipt("x", "y", _run(), s, "", SIGNER)
     assert r.image_digest == ""
     assert r.image == s.sandbox_image
     assert f" {s.sandbox_image} python -m pytest" in r.command
@@ -77,3 +81,32 @@ def test_read_image_digest_empty_when_unavailable(monkeypatch):
 
     monkeypatch.setattr(receipt_mod.asyncio, "create_subprocess_exec", fake_exec)
     assert asyncio.run(read_image_digest("nope")) == ""
+
+
+def _signed_json() -> dict:
+    """A receipt as a client holds it: serialised to JSON and parsed back."""
+    return json.loads(json.dumps(asdict(build_receipt("x", "y", _run(), _settings(), DIGEST, SIGNER))))
+
+
+def test_signature_survives_json_round_trip():
+    assert SIGNER.verify(_signed_json())
+
+
+def test_editing_any_field_breaks_signature():
+    for field, value in [("verdict", "PASS" if _signed_json()["verdict"] == "FAIL" else "FAIL"),
+                         ("exit_code", 7), ("code_sha256", "0" * 64), ("limits", {"network": "host"})]:
+        receipt = _signed_json()
+        receipt[field] = value
+        assert not SIGNER.verify(receipt), field
+
+
+def test_other_key_does_not_verify():
+    assert not Signer.from_seed_b64(None).verify(_signed_json())
+
+
+def test_verdict_follows_exit_code():
+    fail = RunResult(exit_code=1, stdout="", stderr="", duration_s=1, timed_out=False, container_name="c")
+    killed = RunResult(exit_code=137, stdout="", stderr="", duration_s=10, timed_out=True, container_name="c")
+    assert build_receipt("x", "y", _run(), _settings(), DIGEST, SIGNER).verdict == "PASS"
+    assert build_receipt("x", "y", fail, _settings(), DIGEST, SIGNER).verdict == "FAIL"
+    assert build_receipt("x", "y", killed, _settings(), DIGEST, SIGNER).verdict == "FAIL"

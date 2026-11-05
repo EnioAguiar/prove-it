@@ -1,6 +1,7 @@
 """POST /api/review: one review at a time, streamed as Server-Sent Events.
 
-Events: `step` (StepEvent JSON) while the pipeline runs, then exactly one `report` (Report JSON)."""
+Events: `step` (StepEvent JSON) while the pipeline runs, then exactly one `report` (Report JSON).
+GET /api/public-key and POST /api/verify let anyone check a receipt's signature."""
 
 import asyncio
 import contextlib
@@ -13,6 +14,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, StrictStr, field_validator
@@ -25,6 +27,7 @@ from app.mutation import run_mutation
 from app.pipeline import MutateFn, ReceiptFn, Report, Runner, StepEvent, run_review
 from app.receipt import build_receipt, read_image_digest
 from app.sandbox import run_in_sandbox
+from app.signing import Signer
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +46,7 @@ class Services:
     mutate: MutateFn
     receipt: ReceiptFn
     job_root: Path | None
+    signer: Signer
 
 
 async def build_services(settings: Settings) -> Services:
@@ -50,12 +54,14 @@ async def build_services(settings: Settings) -> Services:
     digest = await read_image_digest(settings.sandbox_image)
     runner: Runner = partial(run_in_sandbox, settings=settings)
     job_root = Path(settings.job_root) if settings.job_root else None
+    signer = Signer.from_seed_b64(settings.signing_key)
     return Services(
         llm=VultrLLM(settings),
         runner=runner,
         mutate=lambda code, tests: run_mutation(code, tests, runner, job_root),
-        receipt=lambda code, tests, run: build_receipt(code, tests, run, settings, digest),
+        receipt=lambda code, tests, run: build_receipt(code, tests, run, settings, digest, signer),
         job_root=job_root,
+        signer=signer,
     )
 
 
@@ -198,3 +204,20 @@ async def review(body: ReviewRequest, request: Request,
     if job is None:
         raise HTTPException(429, "busy")
     return _JobResponse(job, review_events(body.code, body.intent, services, job), ping=PING_S)
+
+
+@router.get("/api/public-key")
+def public_key(services: Services = Depends(get_services)) -> dict[str, str]:
+    return {"algorithm": "Ed25519", "key_id": services.signer.key_id,
+            "public_key": services.signer.public_key_b64}
+
+
+@router.post("/api/verify")
+def verify(receipt: dict[str, Any], services: Services = Depends(get_services)) -> dict[str, Any]:
+    """Is this receipt exactly what this server signed? Any edited field breaks the signature."""
+    signer = services.signer
+    if receipt.get("key_id") != signer.key_id:
+        return {"valid": False, "reason": "not signed by this server's key"}
+    if not signer.verify(receipt):
+        return {"valid": False, "reason": "contents were changed after signing"}
+    return {"valid": True, "reason": "signature matches: unchanged since the run"}

@@ -55,6 +55,7 @@ export interface MutationResult {
 }
 
 export interface Receipt {
+  verdict: "PASS" | "FAIL";
   code_sha256: string;
   tests_sha256: string;
   image: string;
@@ -62,9 +63,13 @@ export interface Receipt {
   runtime: string;
   limits: Record<string, string>;
   exit_code: number;
+  timed_out: boolean;
   duration_s: number;
   command: string;
   created_at: string;
+  key_id: string;
+  /** Ed25519, base64, over every other field. */
+  signature: string;
 }
 
 export interface Report {

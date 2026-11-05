@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+from dataclasses import asdict
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +10,9 @@ from app import api
 from app.llm import LLMError
 from app.config import Settings, get_settings
 from app.main import app
+from app.receipt import build_receipt
+from app.sandbox import RunResult
+from app.signing import Signer
 from app.pipeline import Report, StepEvent
 
 
@@ -28,12 +32,14 @@ def _events(text: str) -> list[tuple[str, dict]]:
             name = None
     return out
 
+SIGNER = Signer.from_seed_b64(None)
+
 
 @pytest.fixture(autouse=True)
 def fresh_state():
     api.gate.reset()
     app.dependency_overrides[api.get_services] = lambda: api.Services(
-        llm=None, runner=None, mutate=None, receipt=None, job_root=None)
+        llm=None, runner=None, mutate=None, receipt=None, job_root=None, signer=SIGNER)
     app.dependency_overrides[get_settings] = lambda: Settings(
         vultr_api_key="x", vultr_model="m", _env_file=None)
     yield
@@ -173,7 +179,7 @@ def test_generator_close_releases_lock(monkeypatch):
     async def scenario():
         job = await api.gate.try_acquire()
         assert job is not None
-        gen = api.review_events("x", None, api.Services(None, None, None, None, None), job)
+        gen = api.review_events("x", None, api.Services(None, None, None, None, None, SIGNER), job)
         first = await anext(gen)
         assert first["event"] == "step"
         assert api.gate.lock.locked()
@@ -182,3 +188,15 @@ def test_generator_close_releases_lock(monkeypatch):
     asyncio.run(scenario())
     assert not api.gate.lock.locked()
     assert cancelled == [True]
+
+
+def test_verify_endpoint_detects_forgery():
+    run = RunResult(exit_code=1, stdout="", stderr="", duration_s=1.0, timed_out=False, container_name="c")
+    settings = Settings(vultr_api_key="x", vultr_model="m", _env_file=None)
+    receipt = json.loads(json.dumps(asdict(build_receipt("x", "y", run, settings, "", SIGNER))))
+    client = TestClient(app)
+    assert client.post("/api/verify", json=receipt).json()["valid"] is True
+    receipt["verdict"] = "PASS"
+    forged = client.post("/api/verify", json=receipt).json()
+    assert forged == {"valid": False, "reason": "contents were changed after signing"}
+    assert client.get("/api/public-key").json()["key_id"] == receipt["key_id"]

@@ -131,8 +131,9 @@ class Recorder:
 
     def receipt(self, code: str, tests: str, original_run: RunResult) -> Receipt:
         self.receipt_calls.append((code, tests, original_run))
-        return Receipt("c", "t", "img", "", "runc", {"network": "none"}, original_run.exit_code,
-                       original_run.duration_s, "docker run ...", "2026-11-03T00:00:00Z")
+        return Receipt("FAIL", "c", "t", "img", "", "runc", {"network": "none"}, original_run.exit_code,
+                       original_run.timed_out, original_run.duration_s, "docker run ...",
+                       "2026-11-03T00:00:00Z", "k", "sig")
 
 
 def review(llm, runner, rec=None, code=CODE, intent="split into installments", job_root=None):

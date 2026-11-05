@@ -69,6 +69,9 @@ export default function ProveIt({ examples }: { examples: Example[] }) {
         <p className="masthead-note">
           Runs on a Vultr VM. Verdicts come from pytest&apos;s exit code, never from the model.
         </p>
+        <a className="masthead-link" href="/verify/">
+          Verify a receipt
+        </a>
         <a className="masthead-link" href="https://github.com/EnioAguiar/prove-it">
           Source on GitHub
         </a>

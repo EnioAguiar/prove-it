@@ -11,6 +11,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "openai>=3.42.1",
     "sse-starlette>=3.6.0",
+    "cryptography>=44",
 ]
 
 [dependency-groups]

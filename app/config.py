@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     sandbox_runtime: str = "runc"
     trust_proxy: bool = False  # behind Caddy: client IP = last X-Forwarded-For entry
     job_root: str | None = None  # host-visible dir for sandbox job dirs (deploy)
+    signing_key: str | None = None  # base64 Ed25519 seed; `python -m app.signing` makes one
 
 
 @lru_cache
