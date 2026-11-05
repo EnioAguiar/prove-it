@@ -1,0 +1,17 @@
+[
+  {
+    "id": "parcelamento",
+    "label": "Installments bug",
+    "intent": "Split a purchase into n installments that add up exactly to the total."
+  },
+  {
+    "id": "hostile",
+    "label": "Hostile code",
+    "intent": "Count the words in a string."
+  },
+  {
+    "id": "hostile_loop",
+    "label": "Infinite loop",
+    "intent": ""
+  }
+]
