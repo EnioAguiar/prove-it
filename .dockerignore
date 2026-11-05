@@ -1,0 +1,10 @@
+# Never bake the API key into an image.
+.env
+.git
+.venv
+**/__pycache__
+.pytest_cache
+.superpowers
+frontend/node_modules
+frontend/.next
+frontend/out

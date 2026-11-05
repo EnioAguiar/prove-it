@@ -1,0 +1,35 @@
+# Production on the Vultr VM: `docker compose up -d --build` after deploy/setup_vm.sh.
+# .env holds VULTR_API_KEY, VULTR_MODEL, SANDBOX_IMAGE, SANDBOX_RUNTIME and SITE_ADDRESS.
+services:
+  api:
+    build: .
+    env_file: .env
+    environment:
+      TRUST_PROXY: "true"
+      # Same path inside and outside the container, so `docker run -v JOB:/work` resolves on the host.
+      JOB_ROOT: /srv/proveit/jobs
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /srv/proveit/jobs:/srv/proveit/jobs
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

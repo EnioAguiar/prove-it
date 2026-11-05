@@ -49,12 +49,13 @@ async def build_services(settings: Settings) -> Services:
     """Real wiring; the image digest is read once (called from the app lifespan)."""
     digest = await read_image_digest(settings.sandbox_image)
     runner: Runner = partial(run_in_sandbox, settings=settings)
+    job_root = Path(settings.job_root) if settings.job_root else None
     return Services(
         llm=VultrLLM(settings),
         runner=runner,
-        mutate=lambda code, tests: run_mutation(code, tests, runner),
+        mutate=lambda code, tests: run_mutation(code, tests, runner, job_root),
         receipt=lambda code, tests, run: build_receipt(code, tests, run, settings, digest),
-        job_root=Path(settings.job_root) if settings.job_root else None,
+        job_root=job_root,
     )
 
 

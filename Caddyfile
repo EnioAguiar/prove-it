@@ -1,0 +1,21 @@
+{$SITE_ADDRESS} {
+	# Server-Sent Events: pass every chunk through as soon as it arrives, never compress.
+	handle /api/* {
+		reverse_proxy api:8000 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		encode zstd gzip
+		root * /srv
+		file_server
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}

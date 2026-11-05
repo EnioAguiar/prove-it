@@ -131,13 +131,14 @@ def _snippet(node: ast.AST, cap: int = 80) -> str:
     return text if len(text) <= cap else text[:cap - 1] + "…"
 
 
-async def run_mutation(code: str, tests: str, runner: Runner) -> MutationResult:
+async def run_mutation(code: str, tests: str, runner: Runner, job_root: Path | None = None) -> MutationResult:
     """Run every mutant of `code` against the frozen `tests` in one sandbox run.
-    A mutant counts as killed only if the runner reports it killed in a trustworthy run."""
+    A mutant counts as killed only if the runner reports it killed in a trustworthy run.
+    `job_root` must be a path the Docker host sees too (deploy: API runs in a container)."""
     mutants = make_mutants(code)
     if not mutants:
         return MutationResult(total=0, killed=0, survivors=[])
-    with tempfile.TemporaryDirectory(prefix="proveit-mut-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="proveit-mut-", dir=job_root) as tmp:
         job_dir = Path(tmp)
         _write_job(job_dir, tests, mutants)
         result = await runner(job_dir, RUN_ARGV, RUN_TIMEOUT_S)
