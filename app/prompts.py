@@ -12,6 +12,7 @@ Rules:
 - The module under test is importable as `target`. The test file must contain the exact line `from target import *` and must not import the code any other way.
 - Include at least one test decorated with Hypothesis `@given` that checks a property derived from the stated intent or the docstring: an invariant that must hold for every valid input, not a single example.
 - Choose strategies that only generate inputs the intent says are valid (use `st.integers(min_value=...)`, `assume`, etc.).
+- Keep generated inputs small: the tests run with 256 MB of memory and a 10 second limit. Bound every size or count (list lengths, repeat counts, number of parts) with `max_value`/`max_size` of at most 1000.
 - Tests must be deterministic and must not touch the network, files, subprocesses or environment variables.
 - {UNTRUSTED_NOTE}
 - Reply with exactly one ```python fenced block containing the complete test file, and nothing else inside code fences.

@@ -13,7 +13,12 @@ from app import prompts
 from app.config import Settings
 
 TIMEOUT_S = 60
-MAX_TOKENS = 1500
+# Every chat model on Vultr Inference reasons before answering, and reasoning tokens count
+# against max_tokens. 1500 was used up by reasoning alone on hostile inputs (finish_reason
+# "length", empty content), so leave room for reasoning plus a full test file, and keep the
+# reasoning short: these are small, well-specified artifacts.
+MAX_TOKENS = 8000
+REASONING_EFFORT = "low"
 FENCED_PYTHON = re.compile(r"```python\n(.*?)```", re.S)
 
 Validator = Callable[[ast.Module], str | None]
@@ -93,12 +98,17 @@ class VultrLLM(LLM):
                 messages=messages,
                 temperature=0,
                 max_tokens=MAX_TOKENS,
+                reasoning_effort=REASONING_EFFORT,
             )
         except openai.APIError as exc:
             raise LLMError("model unavailable") from exc
         if not resp.choices:
             return ""
-        return resp.choices[0].message.content or ""
+        choice = resp.choices[0]
+        if choice.finish_reason == "length":
+            # A cut-off reply has no complete code block; retrying with the same budget repeats it.
+            raise LLMError("model ran out of tokens before answering")
+        return choice.message.content or ""
 
     async def _code(self, system: str, user: str, validate: Validator | None = None) -> str:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]

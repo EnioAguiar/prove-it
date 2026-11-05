@@ -9,6 +9,15 @@ RUN pip install --no-cache-dir \
 
 COPY *.py /opt/proveit/
 
+# Hypothesis builds a unicode table the first time a test uses st.text()/st.characters()
+# (~5 s at 0.5 CPU) and caches it on disk. The sandbox is read-only, so the cache could never
+# be saved and every text test paid that cost again. Build it once here instead.
+ENV HYPOTHESIS_STORAGE_DIRECTORY=/opt/proveit/hypothesis
+RUN python -W ignore -c "from hypothesis import strategies as st; \
+st.text().example(); st.characters().example(); st.characters(codec='utf-8').example(); \
+st.characters(codec='ascii').example(); st.from_regex(r'\w+').example()" \
+    && chmod -R a+rX /opt/proveit/hypothesis
+
 # One BLAS/OpenMP thread: otherwise numpy starts one per host CPU, and threads count
 # against the sandbox's --pids-limit.
 ENV PYTHONDONTWRITEBYTECODE=1 \

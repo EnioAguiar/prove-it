@@ -23,7 +23,7 @@ def _settings() -> Settings:
     return Settings(vultr_api_key="x", vultr_model="m", _env_file=None)
 
 
-def _completion(content: str | None) -> dict:
+def _completion(content: str | None, finish_reason: str = "stop") -> dict:
     return {
         "id": "cmpl-1",
         "object": "chat.completion",
@@ -33,7 +33,7 @@ def _completion(content: str | None) -> dict:
             {
                 "index": 0,
                 "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }
         ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
@@ -119,6 +119,18 @@ def test_empty_content_counts_as_invalid():
         asyncio.run(_llm(fake).generate_tests(USER_CODE, None))
 
 
+def test_token_cutoff_fails_without_wasted_retry():
+    calls = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        return httpx2.Response(200, json=_completion(None, finish_reason="length"))
+
+    with pytest.raises(LLMError, match="^model ran out of tokens before answering$"):
+        asyncio.run(_llm(handler).generate_tests(USER_CODE, None))
+    assert len(calls) == 1
+
+
 def test_timeout_raises_model_unavailable():
     calls = []
 
@@ -145,7 +157,9 @@ def test_sends_temperature_zero_and_model():
     body = fake.requests[0]
     assert body["model"] == "m"
     assert body["temperature"] == 0
-    assert body["max_tokens"] == 1500
+    # Reasoning tokens share this budget; 1500 was spent on reasoning alone (empty reply).
+    assert body["max_tokens"] >= 4000
+    assert body["reasoning_effort"] == "low"
     sent = "\n".join(m["content"] for m in body["messages"])
     assert USER_CODE in sent
     assert "adds numbers" in sent
