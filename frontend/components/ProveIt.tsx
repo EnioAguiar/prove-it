@@ -14,6 +14,7 @@ export default function ProveIt({ examples }: { examples: Example[] }) {
   const [lines, setLines] = useState<TapeLine[]>([]);
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [queuePosition, setQueuePosition] = useState<number | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const abort = useRef<AbortController | null>(null);
 
@@ -39,13 +40,18 @@ export default function ProveIt({ examples }: { examples: Example[] }) {
     setLines([]);
     setReport(null);
     setError(null);
+    setQueuePosition(null);
     setStartedAt(Date.now());
     try {
       await streamReview(
         code,
         intent,
         {
-          onStep: (event) => addStep(event, (performance.now() - start) / 1000),
+          onQueue: setQueuePosition,
+          onStep: (event) => {
+            setQueuePosition(null);
+            addStep(event, (performance.now() - start) / 1000);
+          },
           onReport: setReport,
         },
         controller.signal,
@@ -58,7 +64,10 @@ export default function ProveIt({ examples }: { examples: Example[] }) {
           : "Something broke while reading the result. Try again.",
       );
     } finally {
-      if (abort.current === controller) setRunning(false);
+      if (abort.current === controller) {
+        setRunning(false);
+        setQueuePosition(null);
+      }
     }
   }
 
@@ -69,6 +78,9 @@ export default function ProveIt({ examples }: { examples: Example[] }) {
         <p className="masthead-note">
           Runs on a Vultr VM. Verdicts come from pytest&apos;s exit code, never from the model.
         </p>
+        <a className="masthead-link" href="/demo.mp4">
+          Watch the 3-minute demo
+        </a>
         <a className="masthead-link" href="/verify/">
           Verify a receipt
         </a>
@@ -102,6 +114,7 @@ export default function ProveIt({ examples }: { examples: Example[] }) {
             error={error}
             running={running}
             startedAt={startedAt}
+            queuePosition={queuePosition}
           />
         </aside>
 

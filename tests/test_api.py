@@ -33,6 +33,7 @@ def _events(text: str) -> list[tuple[str, dict]]:
     return out
 
 SIGNER = Signer.from_seed_b64(None)
+SERVICES = api.Services(None, None, None, None, None, SIGNER)
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +81,7 @@ def test_rejects_large_code(client, monkeypatch):
     assert resp.status_code == 413
 
 
-def test_busy_while_running(client, monkeypatch):
+def test_second_request_from_same_ip_is_refused(client, monkeypatch):
     started, release = threading.Event(), threading.Event()
 
     async def slow(code, intent, *args, job_root=None):
@@ -96,7 +97,7 @@ def test_busy_while_running(client, monkeypatch):
     assert started.wait(10)
     second = client.post("/api/review", json={"code": "x = 1\n"})
     assert second.status_code == 429
-    assert second.json() == {"detail": "busy"}
+    assert second.json() == {"detail": "already running"}
     release.set()
     t.join(10)
     assert first["resp"].status_code == 200
@@ -136,7 +137,7 @@ def test_unexpected_error_becomes_internal_error(client, monkeypatch):
     assert report["verdict"] == "ERROR"
     assert report["error"] == "internal error"
     assert "secret" not in json.dumps(report)
-    assert not api.gate.lock.locked()
+    assert not api.gate.active
 
 
 def test_rate_limit(client, monkeypatch):
@@ -162,8 +163,8 @@ def test_client_ip_trusts_last_forwarded_only_when_configured():
     assert api.client_ip(Req(), trust_proxy=True) == "2.2.2.2"
 
 
-def test_generator_close_releases_lock(monkeypatch):
-    """A client disconnect closes the event generator mid-run; the lock must come back."""
+def test_generator_close_releases_ticket(monkeypatch):
+    """A client disconnect closes the event generator mid-run; the slot must come back."""
     cancelled = []
 
     async def stuck(code, intent, llm, runner, emit, *args, job_root=None):
@@ -177,17 +178,95 @@ def test_generator_close_releases_lock(monkeypatch):
     monkeypatch.setattr(api, "run_review", stuck)
 
     async def scenario():
-        job = await api.gate.try_acquire()
-        assert job is not None
-        gen = api.review_events("x", None, api.Services(None, None, None, None, None, SIGNER), job)
+        ticket = api.gate.admit("1.1.1.1")
+        gen = api.review_events("x", None, SERVICES, ticket)
         first = await anext(gen)
         assert first["event"] == "step"
-        assert api.gate.lock.locked()
+        assert "1.1.1.1" in api.gate.active
         await gen.aclose()
+        assert not api.gate.active
+        # the slot is free again: a new client runs at once
+        again = api.review_events("x", None, SERVICES, api.gate.admit("2.2.2.2"))
+        assert (await anext(again))["event"] == "step"
+        await again.aclose()
 
     asyncio.run(scenario())
-    assert not api.gate.lock.locked()
+    assert cancelled == [True, True]
+
+
+def test_waiting_client_sees_its_place_then_runs(monkeypatch):
+    """With every slot busy, the next client gets queue positions, then its review."""
+    gates = []
+
+    async def held(code, intent, llm, runner, emit, *args, job_root=None):
+        await emit(StepEvent("parse", "start", ""))
+        gate = asyncio.Event()
+        gates.append(gate)
+        await gate.wait()
+        return _report(code)
+
+    monkeypatch.setattr(api, "run_review", held)
+
+    async def scenario():
+        running = [api.review_events("x", None, SERVICES, api.gate.admit(f"10.0.0.{i}"))
+                   for i in range(api.CONCURRENCY)]
+        for gen in running:
+            assert (await anext(gen))["event"] == "step"
+        waiter = api.review_events("x", None, SERVICES, api.gate.admit("10.0.1.1"))
+        first = await anext(waiter)
+        assert first == {"event": "queue", "data": json.dumps({"position": 1})}
+        nxt = asyncio.ensure_future(anext(waiter))
+        await asyncio.sleep(0.05)
+        assert not nxt.done()  # still waiting
+        gates[0].set()
+        assert [e["event"] async for e in running[0]] == ["report"]
+        assert (await asyncio.wait_for(nxt, 3))["event"] == "step"
+        for gen in (*running[1:], waiter):
+            await gen.aclose()
+
+    asyncio.run(scenario())
+    assert not api.gate.active
+
+
+def test_queue_full_is_refused():
+    for i in range(api.MAX_WAITING):  # admitted, none has started waiting for a slot yet
+        api.gate.admit(f"10.0.0.{i}")
+    with pytest.raises(api.HTTPException) as exc:
+        api.gate.admit("10.9.9.9")
+    assert exc.value.detail == "queue full"
+
+
+def test_hourly_limit(monkeypatch):
+    monkeypatch.setattr(api, "HOURLY_LIMIT", 3)
+    for i in range(3):
+        api.gate.admit(f"10.0.0.{i}").release()
+    with pytest.raises(api.HTTPException) as exc:
+        api.gate.admit("10.9.9.9")
+    assert exc.value.detail == "hourly limit"
+
+
+def test_review_is_stopped_at_the_time_limit(monkeypatch):
+    cancelled = []
+
+    async def forever(code, intent, llm, runner, emit, *args, job_root=None):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr(api, "run_review", forever)
+    monkeypatch.setattr(api, "REVIEW_TIMEOUT_S", 0.2)
+
+    async def scenario():
+        return [e async for e in api.review_events("x", None, SERVICES, api.gate.admit("1.1.1.1"))]
+
+    events = asyncio.run(scenario())
+    assert [e["event"] for e in events] == ["report"]
+    report = json.loads(events[0]["data"])
+    assert report["verdict"] == "ERROR" and "longer than" in report["error"]
     assert cancelled == [True]
+    assert not api.gate.active
 
 
 def test_verify_endpoint_detects_forgery():

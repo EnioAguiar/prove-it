@@ -1,6 +1,6 @@
-"""POST /api/review: one review at a time, streamed as Server-Sent Events.
+"""POST /api/review: fair queue, then the review, streamed as Server-Sent Events.
 
-Events: `step` (StepEvent JSON) while the pipeline runs, then exactly one `report` (Report JSON).
+Events: `queue` ({"position": n}) while waiting, `step` (StepEvent JSON) while the pipeline runs, then exactly one `report` (Report JSON).
 GET /api/public-key and POST /api/verify let anyone check a receipt's signature."""
 
 import asyncio
@@ -32,8 +32,12 @@ from app.signing import Signer
 log = logging.getLogger(__name__)
 
 MAX_CODE_BYTES = 20_000
-RATE_LIMIT = 10
+RATE_LIMIT = 10  # reviews per IP per RATE_WINDOW_S
 RATE_WINDOW_S = 600.0
+HOURLY_LIMIT = 100  # reviews per hour for everyone: caps model spend under a many-IP flood
+CONCURRENCY = 2  # reviews running at once (each sandbox: 0.5 CPU, 256 MB)
+MAX_WAITING = 6  # queue length; beyond it, 429 "queue full"
+REVIEW_TIMEOUT_S = 120.0  # one review never holds a slot longer than this
 PING_S = 15
 
 router = APIRouter()
@@ -69,48 +73,90 @@ def get_services(request: Request) -> Services:
     return request.app.state.services
 
 
-class _Job:
-    """One holder of the busy lock; release() is idempotent so double cleanup is harmless."""
+class Ticket:
+    """One client's place: waiting in line, then running. Each IP holds at most one at a time,
+    so a client with many requests still occupies one slot. release() is idempotent."""
 
-    def __init__(self, lock: asyncio.Lock) -> None:
-        self._lock = lock
-        self._held = True
+    def __init__(self, gate: "Gate", ip: str) -> None:
+        self._gate = gate
+        self.ip = ip
+        self._acquire: asyncio.Future | None = None
+        self._released = False
+
+    def position(self) -> int:
+        """1 = next to run; 0 = running."""
+        if self._acquire is not None and self._acquire.done():
+            return 0
+        return self._gate.waiting.index(self) + 1
+
+    async def turns(self) -> AsyncIterator[int]:
+        """Yield the queue position whenever it changes, until it is this ticket's turn."""
+        self._acquire = asyncio.ensure_future(self._gate.slots.acquire())
+        await asyncio.sleep(0)  # a free slot is taken right here, so no queue event is sent
+        last = None
+        while not self._acquire.done():
+            if (pos := self.position()) != last:
+                last = pos
+                yield pos
+            await asyncio.wait({self._acquire}, timeout=1.0)
+        self._gate.waiting.remove(self)
 
     def release(self) -> None:
-        if self._held:
-            self._held = False
-            self._lock.release()
+        if self._released:
+            return
+        self._released = True
+        self._gate.active.pop(self.ip, None)
+        if self in self._gate.waiting:
+            self._gate.waiting.remove(self)
+        if self._acquire is None:
+            return
+        if self._acquire.done() and not self._acquire.cancelled():
+            self._gate.slots.release()
+        else:
+            self._acquire.cancel()
 
 
 class Gate:
-    """Busy lock plus in-memory sliding-window rate limit per client IP."""
+    """Fair admission: per-IP rate limit, one ticket per IP, a bounded FIFO queue, an hourly cap."""
 
     def __init__(self) -> None:
         self.reset()
 
     def reset(self) -> None:
-        self.lock = asyncio.Lock()
+        self.slots = asyncio.Semaphore(CONCURRENCY)
+        self.waiting: list[Ticket] = []
+        self.active: dict[str, Ticket] = {}
         self._hits: dict[str, deque[float]] = {}
+        self._hour: deque[float] = deque()
 
-    def allow(self, ip: str) -> bool:
-        now = time.monotonic()
+    def _allow(self, ip: str, now: float) -> bool:
         for key in list(self._hits):  # prune every IP so the store cannot grow unbounded
             hits = self._hits[key]
             while hits and now - hits[0] >= RATE_WINDOW_S:
                 hits.popleft()
             if not hits:
                 del self._hits[key]
-        hits = self._hits.setdefault(ip, deque())
-        if len(hits) >= RATE_LIMIT:
-            return False
-        hits.append(now)
-        return True
+        return len(self._hits.get(ip, ())) < RATE_LIMIT
 
-    async def try_acquire(self) -> _Job | None:
-        if self.lock.locked():
-            return None
-        await self.lock.acquire()  # uncontended: returns without suspending
-        return _Job(self.lock)
+    def admit(self, ip: str) -> Ticket:
+        """A ticket, or HTTPException(429) with the reason the client should see."""
+        now = time.monotonic()
+        while self._hour and now - self._hour[0] >= 3600:
+            self._hour.popleft()
+        if ip in self.active:
+            raise HTTPException(429, "already running")
+        if not self._allow(ip, now):
+            raise HTTPException(429, "rate limited")
+        if len(self._hour) >= HOURLY_LIMIT:
+            raise HTTPException(429, "hourly limit")
+        if len(self.waiting) >= MAX_WAITING:
+            raise HTTPException(429, "queue full")
+        self._hits.setdefault(ip, deque()).append(now)
+        self._hour.append(now)
+        ticket = Ticket(self, ip)
+        self.active[ip] = ticket
+        self.waiting.append(ticket)
+        return ticket
 
 
 gate = Gate()
@@ -147,10 +193,15 @@ _END = object()
 
 
 async def review_events(code: str, intent: str | None, services: Services,
-                        job: _Job) -> AsyncIterator[dict[str, str]]:
-    """Run the review, yielding step events then one report; always releases `job`."""
+                        ticket: Ticket) -> AsyncIterator[dict[str, str]]:
+    """Wait in line (`queue` events), then the review: `step` events and one `report`.
+    Always releases `ticket`."""
     queue: asyncio.Queue[object] = asyncio.Queue()
+    task: asyncio.Task | None = None
     try:
+        async for position in ticket.turns():
+            yield {"event": "queue", "data": json.dumps({"position": position})}
+
         async def emit(event: StepEvent) -> None:
             await queue.put(event)
 
@@ -158,9 +209,23 @@ async def review_events(code: str, intent: str | None, services: Services,
             code, intent, services.llm, services.runner, emit, services.mutate, services.receipt,
             job_root=services.job_root))
         task.add_done_callback(lambda _: queue.put_nowait(_END))
-        try:
-            while (item := await queue.get()) is not _END:
-                yield _sse("step", item)
+        deadline = asyncio.get_running_loop().time() + REVIEW_TIMEOUT_S
+        timed_out = False
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), deadline - asyncio.get_running_loop().time())
+            except TimeoutError:
+                timed_out = True
+                break
+            if item is _END:
+                break
+            yield _sse("step", item)
+        if timed_out:
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            report = _error_report(code, f"the review took longer than {REVIEW_TIMEOUT_S:.0f} s and was stopped")
+        else:
             try:
                 report = task.result()
             except LLMError as exc:
@@ -168,28 +233,27 @@ async def review_events(code: str, intent: str | None, services: Services,
             except Exception:
                 log.exception("review failed")
                 report = _error_report(code, "internal error")
-            yield _sse("report", report)
-        finally:
-            if not task.done():  # client went away mid-run
-                task.cancel()
-                with contextlib.suppress(BaseException):
-                    await task
+        yield _sse("report", report)
     finally:
-        job.release()
+        if task is not None and not task.done():  # client went away mid-run
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+        ticket.release()
 
 
-class _JobResponse(EventSourceResponse):
-    """Releases the job even if the stream never started (client gone before first byte)."""
+class _TicketResponse(EventSourceResponse):
+    """Releases the ticket even if the stream never started (client gone before first byte)."""
 
-    def __init__(self, job: _Job, *args, **kwargs) -> None:
+    def __init__(self, ticket: Ticket, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._job = job
+        self._ticket = ticket
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
-            self._job.release()
+            self._ticket.release()
 
 
 @router.post("/api/review")
@@ -198,12 +262,8 @@ async def review(body: ReviewRequest, request: Request,
                  services: Services = Depends(get_services)) -> EventSourceResponse:
     if len(body.code.encode()) > MAX_CODE_BYTES:
         raise HTTPException(413, "code too large")
-    if not gate.allow(client_ip(request, trust_proxy=settings.trust_proxy)):
-        raise HTTPException(429, "rate limited")
-    job = await gate.try_acquire()
-    if job is None:
-        raise HTTPException(429, "busy")
-    return _JobResponse(job, review_events(body.code, body.intent, services, job), ping=PING_S)
+    ticket = gate.admit(client_ip(request, trust_proxy=settings.trust_proxy))
+    return _TicketResponse(ticket, review_events(body.code, body.intent, services, ticket), ping=PING_S)
 
 
 @router.get("/api/public-key")

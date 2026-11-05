@@ -87,7 +87,9 @@ On the live site, load an example:
 - **Hostile code**: a word counter that tries to write to `/`, read the API key, open a socket and fork-bomb, plus a prompt injection. FAIL, four containment events, no fix.
 - **Infinite loop**: killed at the time limit.
 
-Limits: 20,000 bytes of code, one review at a time (HTTP 429 "busy"), 10 reviews per IP per 10 minutes.
+Limits, so nobody can lock judges out: 20,000 bytes of code; 2 reviews run at once and the rest wait in a fair line (the run log shows your place); one review per IP at a time; 10 reviews per IP per 10 minutes; 100 reviews per hour in total; every review stopped after 120 s.
+
+Watch the demo: https://64-177-58-205.sslip.io/demo.mp4
 
 ## Run it yourself
 

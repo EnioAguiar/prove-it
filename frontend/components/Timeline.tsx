@@ -36,9 +36,10 @@ interface Props {
   error: string | null;
   running: boolean;
   startedAt: number | null;
+  queuePosition: number | null;
 }
 
-export default function Timeline({ lines, report, error, running, startedAt }: Props) {
+export default function Timeline({ lines, report, error, running, startedAt, queuePosition }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const idle = !running && lines.length === 0 && !report && !error;
 
@@ -62,6 +63,15 @@ export default function Timeline({ lines, report, error, running, startedAt }: P
       {idle && (
         <p className="tape-empty">
           Nothing printed yet. Paste code or load an example, then press Prove it.
+        </p>
+      )}
+
+      {queuePosition !== null && (
+        <p className="tape-empty" aria-live="polite">
+          {queuePosition === 1
+            ? "Every sandbox is busy. You're next in line."
+            : `Every sandbox is busy. You're #${queuePosition} in line.`}
+          <span className="tape-cursor" />
         </p>
       )}
 

@@ -1,6 +1,8 @@
 import type { Report, StepEvent } from "./types";
 
 export interface ReviewHandlers {
+  /** Place in line while every slot is busy (1 = next). */
+  onQueue: (position: number) => void;
   onStep: (event: StepEvent) => void;
   onReport: (report: Report) => void;
 }
@@ -9,7 +11,9 @@ export interface ReviewHandlers {
 export class ReviewError extends Error {}
 
 const HTTP_MESSAGES: Record<string, string> = {
-  busy: "Another review is running right now. Try again in a minute.",
+  "already running": "You already have a review running or waiting. Wait for it to finish.",
+  "queue full": "The line is full right now. Try again in a minute.",
+  "hourly limit": "The demo reached its hourly limit. Try again later in the hour.",
   "rate limited": "You ran 10 reviews in the last 10 minutes. Wait a few minutes and try again.",
   "code too large": "The code is over 20,000 bytes. Paste a smaller piece.",
 };
@@ -71,7 +75,8 @@ export async function streamReview(
       }
       if (data.length === 0) continue;
       const payload = JSON.parse(data.join("\n"));
-      if (event === "step") handlers.onStep(payload as StepEvent);
+      if (event === "queue") handlers.onQueue((payload as { position: number }).position);
+      else if (event === "step") handlers.onStep(payload as StepEvent);
       else if (event === "report") {
         gotReport = true;
         handlers.onReport(payload as Report);
